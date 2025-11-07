@@ -1,0 +1,280 @@
+<!--
+  ==============================================
+  PWA 바코드 로거
+  - 서버 전송 페이로드: { deviceId, items:[ {id, barcode, tsISO, workerId, deviceId} ] }
+  - 스캐너 모드에서 작업자 입력 disabled, 수동 모드에서만 enabled
+  - IndexedDB: scan-db / scans (id[PK], barcode, tsISO, workerId, deviceId, synced)
+  ==============================================
+-->
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <title>JNC Co. Barcode Logger</title>
+  <meta name="theme-color" content="#0ea5e9" />
+
+  <script>
+    // ---- 동적 manifest ----
+    (function makeManifest(){
+      function icon(sz){
+        const svg = encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 ${sz} ${sz}'><rect width='100%' height='100%' fill='#0ea5e9'/><text x='50%' y='55%' font-size='${Math.round(sz*0.5)}' fill='white' text-anchor='middle' dominant-baseline='middle'>S</text></svg>`);
+        return { src:`data:image/svg+xml,${svg}`, sizes:`${sz}x${sz}`, type:'image/png', purpose:'any maskable' };
+      }
+      const manifest = { name:'Scan Logger', short_name:'Scan', start_url:'.', scope:'.', display:'standalone', background_color:'#ffffff', theme_color:'#0ea5e9', icons:[icon(192), icon(512)] };
+      const blob = new Blob([JSON.stringify(manifest)], {type:'application/manifest+json'});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('link'); link.rel='manifest'; link.href=url; document.head.appendChild(link);
+    })();
+
+    // ---- Service Worker 등록 (정적 경로) ----
+    if('serviceWorker' in navigator){
+      window.addEventListener('load', ()=>{
+        navigator.serviceWorker.register('./sw.js').catch(console.error);
+      });
+    }
+  </script>
+
+  <style>
+    :root { --brand:#0ea5e9; --bg:#0b1324; --card:#0f172a; --border:#1e293b; --muted:#94a3b8; --ok:#10b981; --warn:#f59e0b; }
+    html,body{height:100%}
+    body{margin:0;font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:#e2e8f0; background:var(--bg);} 
+    .wrap{max-width:980px;margin:0 auto;padding:20px 16px 96px}
+    h1{font-size:20px;margin:0 0 12px;display:flex;gap:8px;align-items:center}
+    h1 .dot{width:10px;height:10px;border-radius:50%;background:var(--brand);box-shadow:0 0 10px var(--brand)}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px;margin:10px 0}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .row > *{flex:1 1 auto}
+    label{color:#a3b8d0;font-size:12px;margin-right:8px}
+    input[type=text], button, select{background:#0b1324;color:#e2e8f0;border:1px solid var(--border);border-radius:12px;padding:10px 3%; margin-bottom: 15px;}
+    button{cursor:pointer}
+    button.primary{background:var(--brand);border-color:transparent;color:#001a28;font-weight:600}
+    button.ghost{background:transparent}
+    .meta{color:#9fb1c8;font-size:12px}
+    .grid{display:grid;grid-template-columns: 1fr auto; gap:8px;align-items:center}
+    .hiddenLike{opacity:0;position:absolute;left:-9999px;width:0;height:0}
+    .visible{opacity:1;position:static;left:auto;width:94%}
+
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    thead th{position:sticky;top:0;background:#112031;color:#93c5fd;z-index:1}
+    th,td{border:1px solid #132136;padding:8px;text-align:left;white-space:nowrap}
+    td.barcode{white-space:normal}
+    .listWrap{max-height:56vh;overflow:auto;border:1px dashed var(--border);border-radius:12px}
+	.muted{color:#aaaaaa}
+    .footer{position:fixed;left:0;right:0;bottom:0;background:#0b1324;border-top:1px solid #132136;padding:8px 12px;color:#9fb1c8;display:flex;gap:10px;justify-content:center}
+    .ok{color:#10b981}.warn{color:#fbbf24}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1><span class="dot"></span>Barcode Logger</h1>
+
+    <!-- 상단 제어 패널 -->
+    <div class="card">
+      <div class="row">
+        <div class="grid">
+          <div>
+            <label for="worker">작업자 ID</label>
+            <input id="worker" type="text" placeholder="예: w001" maxlength="32" />
+            <div class="meta">* 수동 입력 모드에서만 편집 가능</div>
+          </div>
+          <div class="meta" id="deviceMeta"></div>
+        </div>
+        <div class="row" style="gap:6px;justify-content:flex-end">
+          <button id="modeBtn" class="ghost" title="스캐너 모드: 키보드 숨김 / 수동 모드: 키보드 허용">스캐너 모드</button>
+          <button id="keepAwakeBtn" class="ghost">화면유지 OFF</button>
+          <button id="focusBtn" class="ghost">포커스</button>
+          <button id="clearBtn" class="ghost">오늘목록 비우기</button>
+          <button id="exportBtn" class="ghost">CSV 내보내기</button>
+          <button id="syncBtn" class="primary">서버 전송(샘플)</button>
+        </div>
+      </div>
+      <div class="meta" id="status">스캐너(HID) 또는 수동 입력 후 Enter로 확정됩니다. (중복 차단 3초)</div>
+    </div>
+
+    <!-- 입력/리스트 영역 -->
+    <div class="card">
+      <!-- 스캐너 모드: 숨김 / 수동 모드: 표시  -->
+      <input id="scanInput" type="text" class="hiddenLike" autocomplete="off" inputmode="none" placeholder="바코드를 입력하거나 스캔 후 Enter" />
+
+      <div class="row" style="gap:6px">
+        <span class="meta">중복 차단: <strong id="dupWindowSec">3</strong>s</span>
+        <span class="meta">오늘 건수: <strong id="count">0</strong></span>
+        <span class="meta" id="modePill">모드: 스캐너</span>
+      </div>
+
+      <div class="listWrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:310px">ID (UUID)</th>
+              <th>바코드 내용</th>
+              <th style="width:170px">찍힌 시각</th>
+              <th style="width:110px">작업자</th>
+            </tr>
+          </thead>
+          <tbody id="list"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">(주)제이앤씨 유통 Copyright ⓒ 2025 jncbtob.com All right reserved.</div>
+
+  <script>
+    // ================= 공통 유틸 =================
+    const $ = s => document.querySelector(s);
+    const iso = t => new Date(t||Date.now()).toISOString();
+	
+	// 한국시간(KST, UTC+9) ISO 문자열 생성 함수
+	function kstISO(date = new Date()) {
+		const offsetMs = 9 * 60 * 60 * 1000; // 9시간
+		const kst = new Date(date.getTime() + offsetMs);
+		const iso = kst.toISOString().replace('Z', '');
+		return iso;
+	}
+	
+    function escapeHtml(s){ return (s||'').toString().replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[m])); }
+
+    // 고유 deviceId 보존
+    //const deviceId = localStorage.deviceId || (localStorage.deviceId = self.crypto?.randomUUID?.() || (Date.now()+"-"+Math.random().toString(16).slice(2)));
+	const deviceId = localStorage.deviceId || (localStorage.deviceId = crypto.randomUUID());
+	if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+	
+    //const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const curr = new Date();
+	const utc = curr.getTime() + (curr.getTimezoneOffset() * 60 * 1000);
+	const KR_TIME_DIFF = 9 * 60 * 60 * 1000;
+	const tz = new Date(utc + KR_TIME_DIFF); 
+    $('#deviceMeta').textContent = `Device: ${deviceId} · TZ: ${tz}`;
+
+    // 작업자 ID (세션에 보존)
+    const workerInput = $('#worker');
+    workerInput.value = sessionStorage.workerId || '';
+    workerInput.addEventListener('input', ()=> sessionStorage.workerId = workerInput.value.trim());
+
+    // ================= IndexedDB =================
+    let db; const DB_NAME='scan-db'; const STORE='scans';
+    const openReq = indexedDB.open(DB_NAME, 3);
+    openReq.onupgradeneeded = e => {
+      const dbx = e.target.result;
+      if(!dbx.objectStoreNames.contains(STORE)){
+        const st = dbx.createObjectStore(STORE, { keyPath:'id' });
+        st.createIndex('by_ts', 'tsISO'); st.createIndex('by_synced', 'synced');
+      } else {
+        const st = e.target.transaction.objectStore(STORE);
+        if(!st.indexNames.contains('by_ts')) st.createIndex('by_ts','tsISO');
+        if(!st.indexNames.contains('by_synced')) st.createIndex('by_synced','synced');
+      }
+    };
+    openReq.onsuccess = async e => { db=e.target.result; await renderToday(); };
+
+    function txPut(v){ return new Promise((res,rej)=>{ const tx=db.transaction(STORE,'readwrite'); tx.objectStore(STORE).put(v); tx.oncomplete=res; tx.onerror=rej; }); }
+    function txReadAll(filter){ return new Promise((res,rej)=>{ const tx=db.transaction(STORE,'readonly'); const st=tx.objectStore(STORE); const arr=[]; st.openCursor().onsuccess=ev=>{ const c=ev.target.result; if(!c) return res(arr); const v=c.value; if(!filter||filter(v)) arr.push(v); c.continue(); }; tx.onerror=rej; }); }
+    function txDeleteMany(filter){ return new Promise((res,rej)=>{ const tx=db.transaction(STORE,'readwrite'); const st=tx.objectStore(STORE); st.openCursor().onsuccess=ev=>{ const c=ev.target.result; if(!c) return; if(!filter||filter(c.value)) c.delete(); c.continue(); }; tx.oncomplete=res; tx.onerror=rej; }); }
+
+    // ================= 모드 전환 (스캐너/수동) =================
+    const input = $('#scanInput'); const modeBtn=$('#modeBtn'); const modePill=$('#modePill');
+    let scannerMode = true; // true=스캐너(키보드 숨김), false=수동(키보드 허용)
+
+    function applyInputMode(){
+      if(scannerMode){
+        // 스캐너 모드: 스캔 input 숨김 + 자동 포커스 (가상키보드 안 뜸)
+        input.classList.remove('visible'); input.classList.add('hiddenLike'); input.setAttribute('inputmode','none');
+        workerInput.disabled = true;
+        modeBtn.textContent='스캐너 모드'; modePill.textContent='모드: 스캐너';
+        setStatus('스캐너 모드: 가상 키보드 숨김 · 작업자 편집 불가');
+        // 스캐너 모드일 때만 자동 포커스 유지
+        input.focus();
+      } else {
+        // 수동 입력 모드: 스캔 input 표시 + 키보드 허용, 하지만 자동 포커스는 주지 않음
+        input.classList.remove('hiddenLike'); input.classList.add('visible'); input.removeAttribute('inputmode');
+        workerInput.disabled = false;
+        modeBtn.textContent='수동 입력 모드'; modePill.textContent='모드: 수동 입력';
+        setStatus('수동 입력 모드: 키보드 허용 · 작업자 편집 가능');
+        // 요청 반영: 자동 포커스/강제 포커스/재포커스 모두 비활성 (blur로 확실히 해도 됨)
+        input.blur();
+      }
+    }
+    modeBtn.addEventListener('click', ()=>{ scannerMode=!scannerMode; applyInputMode(); });
+
+    // 포커스 제어: 스캐너 모드에서만 자동 포커스 동작
+    $('#focusBtn').addEventListener('click', ()=> { if(scannerMode) input.focus(); });
+    window.addEventListener('click', ()=> { if(scannerMode) input.focus(); });
+    window.addEventListener('visibilitychange', ()=> { if(scannerMode && document.visibilityState==='visible') input.focus(); });
+
+    // 최초 적용 (기본: 스캐너 모드 → 자동 포커스됨)
+    applyInputMode();
+
+    // ================= 스캔/입력 처리 =================
+    const DUP_WINDOW_MS = 3000; $('#dupWindowSec').textContent = (DUP_WINDOW_MS/1000)|0;
+    let lastSeen = new Map(); // barcode -> last ms
+
+    input.addEventListener('keydown', async (ev)=>{
+      if(ev.key !== 'Enter') return; // Enter 기준 확정
+      const raw = input.value.trim(); input.value=''; if(!raw) return;
+      const now = Date.now();
+      const workerId = (workerInput.value||'').trim() || 'unknown';
+
+      if(raw.length < 4){ setStatus(`무시: 코드가 너무 짧음 (${raw})`, 'warn'); return; }
+      const last = lastSeen.get(raw)||0; if(now-last < DUP_WINDOW_MS){ setStatus(`중복 차단: ${raw}`, 'warn'); return; }
+      lastSeen.set(raw, now);
+
+      const id = self.crypto?.randomUUID?.() || (String(now)+Math.random());
+      const item = { id, barcode: raw, tsISO: kstISO(), workerId, deviceId, synced:false };
+      await txPut(item);
+      prependRow(item); updateCount(1);
+      //setStatus(`기록됨: ${raw} · id=${String(id).slice(0,8)}…`, 'ok');
+	  setStatus(`기록됨: content=${raw} / id=${String(id)}`, 'ok');
+    });
+
+    // ================= 렌더링 =================
+    const list = $('#list'); const countEl = $('#count');
+    function prependRow(it){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="muted">${escapeHtml(it.id)}</td>
+        <td class="barcode">${escapeHtml(it.barcode)}</td>
+        <td>${escapeHtml(it.tsISO).replace('T',' ').replace('Z','')}</td>
+        <td>${escapeHtml(it.workerId||'')}</td>`;
+      list.prepend(tr);
+	  //<td>${escapeHtml(it.tsISO.replace('T',' ').replace('Z',''))}</td>
+    }
+    async function renderToday(){ if(!db) return; const start=new Date(); start.setHours(0,0,0,0); const today=await txReadAll(v=> new Date(v.tsISO) >= start); list.innerHTML=''; today.sort((a,b)=>b.tsISO.localeCompare(a.tsISO)).forEach(prependRow); countEl.textContent=today.length; setStatus(`오늘 작업 : ${today.length}건`); }
+    function updateCount(delta){ countEl.textContent = (parseInt(countEl.textContent||'0',10) + delta); }
+
+    // ================= CSV / 클리어 / 서버 전송 =================
+    $('#exportBtn').addEventListener('click', async ()=>{
+      const all = await txReadAll();
+      const header = 'scanId,barcode,scanTime,workerId,deviceId\n';
+      const body = all.map(x=>[x.id,x.barcode,x.tsISO,x.workerId,x.deviceId].join(',')).join('\n');
+      const blob = new Blob([header+body], {type:'text/csv'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`scans_${new Date().toISOString().slice(0,10)}.csv`; a.click(); URL.revokeObjectURL(a.href);
+    });
+
+    $('#clearBtn').addEventListener('click', async ()=>{
+      const start = new Date(); start.setHours(0,0,0,0); await txDeleteMany(v=> new Date(v.tsISO) >= start); await renderToday(); setStatus('오늘 목록을 비웠습니다.');
+    });
+
+    $('#syncBtn').addEventListener('click', async ()=>{
+      const unsent = await txReadAll(v=> !v.synced);
+      if(unsent.length===0){ setStatus('전송할 데이터 없음'); return; }
+      setStatus(`전송 중... (${unsent.length}건)`);
+      try{
+        const res = await fetch('/api/scans/batch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ deviceId, items: unsent.map(x=>({ id:x.id, barcode:x.barcode, tsISO:x.tsISO, workerId:x.workerId, deviceId:x.deviceId })) }) });
+        if(!res.ok) throw new Error('HTTP '+res.status);
+        const ids = new Set(unsent.map(u=>u.id));
+        await new Promise((resolve,reject)=>{ const tx=db.transaction(STORE,'readwrite'); const st=tx.objectStore(STORE); st.openCursor().onsuccess=ev=>{ const c=ev.target.result; if(!c) return; const v=c.value; if(ids.has(v.id)) c.update({...v, synced:true}); c.continue(); }; tx.oncomplete=resolve; tx.onerror=reject; });
+        setStatus('전송 완료', 'ok');
+      }catch(e){ console.error(e); setStatus('전송 실패: '+e.message, 'warn'); }
+    });
+
+    // ================= Wake Lock =================
+    let wakeLock=null; const keepBtn=$('#keepAwakeBtn');
+    async function toggleWake(){ if(!('wakeLock' in navigator)){ setStatus('Wake Lock 미지원 브라우저','warn'); return; } try{ if(!wakeLock){ wakeLock=await navigator.wakeLock.request('screen'); keepBtn.textContent='화면유지 ON'; wakeLock.addEventListener('release',()=>{ keepBtn.textContent='화면유지 OFF'; wakeLock=null; }); } else { wakeLock.release(); wakeLock=null; keepBtn.textContent='화면유지 OFF'; } }catch(e){ setStatus('Wake Lock 실패','warn'); } }
+    keepBtn.addEventListener('click', toggleWake);
+
+    // ================= 상태 표시 =================
+    function setStatus(msg, tone){ const el=$('#status'); el.textContent=msg; el.className='meta '+(tone==='ok'?'ok':tone==='warn'?'warn':''); }
+  </script>
+</body>
+</html>
