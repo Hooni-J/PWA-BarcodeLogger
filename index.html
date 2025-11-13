@@ -11,7 +11,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
-  <title>JNC Co. Barcode Logger v9</title>
+  <title>JNC Co. Barcode Logger v0.9</title>
   <meta name="theme-color" content="#0ea5e9" />
 
   <script>
@@ -52,7 +52,8 @@
     button.ghost{background:transparent}
     .meta{color:#9fb1c8;font-size:12px}
     .grid{display:grid;grid-template-columns: 1fr auto; gap:8px;align-items:center}
-    .hiddenLike{opacity:0;position:absolute;left:-9999px;width:0;height:0}
+    /*.hiddenLike{opacity:0;position:absolute;left:-9999px;width:0;height:0}*/
+    .hiddenLike{opacity:0;position:absolute;top:0;left:0;width:1px;height:1px}
     .visible{opacity:1;position:static;left:auto;width:94%}
 
     table{width:100%;border-collapse:collapse;margin-top:8px}
@@ -359,7 +360,22 @@
       if(unsent.length===0){ setStatus('전송할 데이터 없음'); return; }
       setStatus(`전송 중... (${unsent.length}건)`);
       try{
-        const res = await fetch('/api/scans/batch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ deviceId, items: unsent.map(x=>({ id:x.id, barcode:x.barcode, tsISO:x.tsISO, workerId:x.workerId, deviceId:x.deviceId })) }) });
+        const res = await fetch('192.168.219.111/api/scans/batch', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(
+                  { deviceId,
+                    items: unsent.map(x=>(
+                            { id:x.id,
+                              barcode:x.barcode,
+                              tsISO:x.tsISO,
+                              workerId:x.workerId,
+                              deviceId:x.deviceId
+                            }
+                            )
+                    )
+                  })
+        });
         if(!res.ok) throw new Error('HTTP '+res.status);
         const ids = new Set(unsent.map(u=>u.id));
         await new Promise((resolve,reject)=>{ const tx=db.transaction(STORE,'readwrite'); const st=tx.objectStore(STORE); st.openCursor().onsuccess=ev=>{ const c=ev.target.result; if(!c) return; const v=c.value; if(ids.has(v.id)) c.update({...v, synced:true}); c.continue(); }; tx.oncomplete=resolve; tx.onerror=reject; });
@@ -392,7 +408,7 @@
         modalTitle.textContent = '입력 불가';
         modalSub.textContent = '바코드 형식 또는 자릿수를 확인해주세요.';
       } else if(type === 'warn') {
-        modalTitle.textContent = '중복 입력 차단';
+        modalTitle.textContent = '입력 차단';
         modalSub.textContent = '이전 입력과 동일합니다.';
       } else {
         modalTitle.textContent = '바코드 인식';
