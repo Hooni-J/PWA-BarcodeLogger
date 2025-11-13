@@ -2,7 +2,7 @@
 // 캐시 전략: 네비게이션은 네트워크 우선, 실패 시 캐시 폴백 / 정적GET은 캐시 우선-네트워크 갱신
 
 
-const CACHE = 'scan-pwa-v8';
+const CACHE = 'scan-pwa-v9';
 
 
 function isHttpLike(reqOrUrl){

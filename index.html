@@ -11,7 +11,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
-  <title>JNC Co. Barcode Logger</title>
+  <title>JNC Co. Barcode Logger v9</title>
   <meta name="theme-color" content="#0ea5e9" />
 
   <script>
@@ -63,11 +63,65 @@
 	.muted{color:#aaaaaa}
     .footer{position:fixed;left:0;right:0;bottom:0;background:#0b1324;border-top:1px solid #132136;padding:8px 12px;color:#9fb1c8;display:flex;gap:10px;justify-content:center}
     .ok{color:#10b981}.warn{color:#fbbf24}
+
+    /* === 바코드 모달 === */
+    .barcode-modal {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    .barcode-modal.show {
+      display: flex;
+    }
+    .barcode-modal-backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(15,23,42,0.75);
+    }
+    .barcode-modal-box {
+      position: relative;
+      min-width: 260px;
+      max-width: 90vw;
+      background: #0f172a;
+      border-radius: 18px;
+      border: 1px solid #1e293b;
+      padding: 18px 20px 14px;
+      box-shadow: 0 20px 45px rgba(0,0,0,0.6);
+      text-align: center;
+      z-index: 1;
+    }
+    .barcode-modal-title {
+      font-size: 14px;
+      color: #9ca3af;
+      margin-bottom: 6px;
+    }
+    .barcode-modal-code {
+      font-size: 22px;
+      letter-spacing: 0.12em;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+    .barcode-modal-sub {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    .barcode-modal-box.success .barcode-modal-code {
+      color: #22c55e;
+    }
+    .barcode-modal-box.error .barcode-modal-code {
+      color: #f97373;
+    }
+    .barcode-modal-box.warn .barcode-modal-code {
+      color: #e7aa2e;
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1><span class="dot"></span>Barcode Logger</h1>
+    <h1><span class="dot"></span>Barcode Logger v9</h1>
 
     <!-- 상단 제어 패널 -->
     <div class="card">
@@ -95,7 +149,7 @@
     <!-- 입력/리스트 영역 -->
     <div class="card">
       <!-- 스캐너 모드: 숨김 / 수동 모드: 표시  -->
-      <input id="scanInput" type="text" class="hiddenLike" autocomplete="off" inputmode="none" placeholder="바코드를 입력하거나 스캔 후 Enter" />
+      <input id="scanInput" type="text" class="hiddenLike" autocomplete="off" placeholder="바코드를 입력하거나 스캔 후 Enter" />
 
       <div class="row" style="gap:6px">
         <span class="meta">중복 차단: <strong id="dupWindowSec">3</strong>s</span>
@@ -107,15 +161,25 @@
         <table>
           <thead>
             <tr>
-              <th style="width:310px">ID (UUID)</th>
-              <th>바코드 내용</th>
+              <th>바코드 내용</th>			 			  
               <th style="width:170px">찍힌 시각</th>
               <th style="width:110px">작업자</th>
-            </tr>
+			  <th style="width:310px">ID (UUID)</th>
+			</tr>
           </thead>
           <tbody id="list"></tbody>
         </table>
       </div>
+    </div>
+  </div>
+
+  <!-- 바코드 알림 모달 -->
+  <div id="barcodeModal" class="barcode-modal">
+    <div class="barcode-modal-backdrop"></div>
+    <div id="barcodeModalBox" class="barcode-modal-box">
+      <div id="barcodeModalTitle" class="barcode-modal-title">바코드 인식</div>
+      <div id="barcodeModalCode" class="barcode-modal-code">0000-0000-0000</div>
+      <div id="barcodeModalSub" class="barcode-modal-sub">3초 후 자동으로 닫힙니다.</div>
     </div>
   </div>
 
@@ -134,7 +198,9 @@
 		return iso;
 	}
 	
-    function escapeHtml(s){ return (s||'').toString().replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[m])); }
+    function escapeHtml(s){
+      return (s||'').toString().replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[m]));
+    }
 
     // 고유 deviceId 보존
     //const deviceId = localStorage.deviceId || (localStorage.deviceId = self.crypto?.randomUUID?.() || (Date.now()+"-"+Math.random().toString(16).slice(2)));
@@ -144,7 +210,7 @@
     //const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 	const curr = new Date();
 	const utc = curr.getTime() + (curr.getTimezoneOffset() * 60 * 1000);
-	const KR_TIME_DIFF = 9 * 60 * 60 * 1000;
+	const KR_TIME_DIFF = 9 * 60 * 60 * 1000;
 	const tz = new Date(utc + KR_TIME_DIFF); 
     $('#deviceMeta').textContent = `Device: ${deviceId} · TZ: ${tz}`;
 
@@ -174,24 +240,36 @@
     function txDeleteMany(filter){ return new Promise((res,rej)=>{ const tx=db.transaction(STORE,'readwrite'); const st=tx.objectStore(STORE); st.openCursor().onsuccess=ev=>{ const c=ev.target.result; if(!c) return; if(!filter||filter(c.value)) c.delete(); c.continue(); }; tx.oncomplete=res; tx.onerror=rej; }); }
 
     // ================= 모드 전환 (스캐너/수동) =================
-    const input = $('#scanInput'); const modeBtn=$('#modeBtn'); const modePill=$('#modePill');
+    const input = $('#scanInput');
+    const modeBtn=$('#modeBtn');
+    const modePill=$('#modePill');
     let scannerMode = true; // true=스캐너(키보드 숨김), false=수동(키보드 허용)
 
     function applyInputMode(){
       if(scannerMode){
         // 스캐너 모드: 스캔 input 숨김 + 자동 포커스 (가상키보드 안 뜸)
-        input.classList.remove('visible'); input.classList.add('hiddenLike'); input.setAttribute('inputmode','none');
+        input.classList.remove('visible');
+        input.classList.add('hiddenLike');
+        // input.setAttribute('inputmode','none');
+
         workerInput.disabled = true;
-        modeBtn.textContent='스캐너 모드'; modePill.textContent='모드: 스캐너';
+        modeBtn.textContent='스캐너 모드';
+        modePill.textContent='모드: 스캐너';
         setStatus('스캐너 모드: 가상 키보드 숨김 · 작업자 편집 불가');
+
         // 스캐너 모드일 때만 자동 포커스 유지
         input.focus();
       } else {
         // 수동 입력 모드: 스캔 input 표시 + 키보드 허용, 하지만 자동 포커스는 주지 않음
-        input.classList.remove('hiddenLike'); input.classList.add('visible'); input.removeAttribute('inputmode');
+        input.classList.remove('hiddenLike');
+        input.classList.add('visible');
+        // input.removeAttribute('inputmode');
+
         workerInput.disabled = false;
-        modeBtn.textContent='수동 입력 모드'; modePill.textContent='모드: 수동 입력';
+        modeBtn.textContent='수동 입력 모드';
+        modePill.textContent='모드: 수동 입력';
         setStatus('수동 입력 모드: 키보드 허용 · 작업자 편집 가능');
+
         // 요청 반영: 자동 포커스/강제 포커스/재포커스 모두 비활성 (blur로 확실히 해도 됨)
         input.blur();
       }
@@ -199,7 +277,7 @@
     modeBtn.addEventListener('click', ()=>{ scannerMode=!scannerMode; applyInputMode(); });
 
     // 포커스 제어: 스캐너 모드에서만 자동 포커스 동작
-    //$('#focusBtn').addEventListener('click', ()=> { if(scannerMode) input.focus(); });
+    $('#focusBtn').addEventListener('click', ()=> { if(scannerMode) input.focus(); });
     window.addEventListener('click', ()=> { if(scannerMode) input.focus(); });
     window.addEventListener('visibilitychange', ()=> { if(scannerMode && document.visibilityState==='visible') input.focus(); });
 
@@ -212,20 +290,40 @@
 
     input.addEventListener('keydown', async (ev)=>{
       if(ev.key !== 'Enter') return; // Enter 기준 확정
-      const raw = input.value.trim(); input.value=''; if(!raw) return;
-      const now = Date.now();
-      const workerId = (workerInput.value||'').trim() || 'unknown';
+      const raw = input.value.trim();
+      input.value='';
 
-      if(raw.length < 4){ setStatus(`무시: 코드가 너무 짧음 (${raw})`, 'warn'); return; }
-      const last = lastSeen.get(raw)||0; if(now-last < DUP_WINDOW_MS){ setStatus(`중복 차단: ${raw}`, 'warn'); return; }
+	  if(!raw) return;
+      
+	  const now = Date.now();
+      const workerId = (workerInput.value||'').trim() || 'unknown';
+      console.log(raw);
+
+      if(raw.length !== 12){
+		setStatus(`무시: 바코드 자리수 불일치 (${raw})`, 'error');
+        showBarcodeModal(raw, 'error');
+        return;
+	  }
+
+      const last = lastSeen.get(raw)||0;
+      if(now-last < DUP_WINDOW_MS){
+        setStatus(`중복 차단: ${raw}`, 'warn');
+        showBarcodeModal('중복 차단', 'warn');
+        return;
+      }
       lastSeen.set(raw, now);
 
+      // 입력값 4-4-4 바코드 형태로 포맷팅
+      const formatRaw = raw.replace(/(.{4})(.{4})(.{4})/, '$1-$2-$3');
+
       const id = self.crypto?.randomUUID?.() || (String(now)+Math.random());
-      const item = { id, barcode: raw, tsISO: kstISO(), workerId, deviceId, synced:false };
+      const item = { id, barcode: formatRaw, tsISO: kstISO(), workerId, deviceId, synced:false };
       await txPut(item);
       prependRow(item); updateCount(1);
-      //setStatus(`기록됨: ${raw} · id=${String(id).slice(0,8)}…`, 'ok');
-	  setStatus(`기록됨: content=${raw} / id=${String(id)}`, 'ok');
+      //setStatus(`기록됨: ${formatRaw} · id=${String(id).slice(0,8)}…`, 'ok');
+	  setStatus(`기록됨: content=${formatRaw} / id=${String(id)}`, 'ok');
+      showBarcodeModal(formatRaw, 'success');
+
     });
 
     // ================= 렌더링 =================
@@ -233,10 +331,11 @@
     function prependRow(it){
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td class="muted">${escapeHtml(it.id)}</td>
         <td class="barcode">${escapeHtml(it.barcode)}</td>
         <td>${escapeHtml(it.tsISO).replace('T',' ').replace('Z','')}</td>
-        <td>${escapeHtml(it.workerId||'')}</td>`;
+        <td>${escapeHtml(it.workerId||'')}</td>
+		<td class="muted">${escapeHtml(it.id)}</td>
+		`;
       list.prepend(tr);
 	  //<td>${escapeHtml(it.tsISO.replace('T',' ').replace('Z',''))}</td>
     }
@@ -272,6 +371,58 @@
     let wakeLock=null; const keepBtn=$('#keepAwakeBtn');
     async function toggleWake(){ if(!('wakeLock' in navigator)){ setStatus('Wake Lock 미지원 브라우저','warn'); return; } try{ if(!wakeLock){ wakeLock=await navigator.wakeLock.request('screen'); keepBtn.textContent='화면유지 ON'; wakeLock.addEventListener('release',()=>{ keepBtn.textContent='화면유지 OFF'; wakeLock=null; }); } else { wakeLock.release(); wakeLock=null; keepBtn.textContent='화면유지 OFF'; } }catch(e){ setStatus('Wake Lock 실패','warn'); } }
     keepBtn.addEventListener('click', toggleWake);
+
+    // ================= 모달 표시 =================
+    const modal = $('#barcodeModal');
+    const modalBox = $('#barcodeModalBox');
+    const modalTitle = $('#barcodeModalTitle');
+    const modalCode = $('#barcodeModalCode');
+    const modalSub = $('#barcodeModalSub');
+    let modalTimer = null;
+
+    /**
+     * type: 'success' | 'error' | 'warn'
+     */
+    function showBarcodeModal(codeText, type) {
+      // 타입에 따라 스타일 변경
+      modalBox.classList.remove('success', 'error', 'warn');
+      modalBox.classList.add(type);
+
+      if (type === 'error') {
+        modalTitle.textContent = '입력 불가';
+        modalSub.textContent = '바코드 형식 또는 자릿수를 확인해주세요.';
+      } else if(type === 'warn') {
+        modalTitle.textContent = '중복 입력 차단';
+        modalSub.textContent = '이전 입력과 동일합니다.';
+      } else {
+        modalTitle.textContent = '바코드 인식';
+        modalSub.textContent = '3초 후 자동으로 닫힙니다.';
+      }
+
+      modalCode.textContent = codeText;
+      modal.classList.add('show');
+
+      // 이전 타이머 있으면 정리
+      if (modalTimer) {
+        clearTimeout(modalTimer);
+      }
+      modalTimer = setTimeout(hideBarcodeModal, 3000);
+    }
+
+    function hideBarcodeModal() {
+      modal.classList.remove('show');
+      if (modalTimer) {
+        clearTimeout(modalTimer);
+        modalTimer = null;
+      }
+    }
+
+    // 배경 클릭 시 닫기 (선택)
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) {
+        hideBarcodeModal();
+      }
+    });
 
     // ================= 상태 표시 =================
     function setStatus(msg, tone){ const el=$('#status'); el.textContent=msg; el.className='meta '+(tone==='ok'?'ok':tone==='warn'?'warn':''); }
