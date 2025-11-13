@@ -199,7 +199,7 @@
     modeBtn.addEventListener('click', ()=>{ scannerMode=!scannerMode; applyInputMode(); });
 
     // 포커스 제어: 스캐너 모드에서만 자동 포커스 동작
-    $('#focusBtn').addEventListener('click', ()=> { if(scannerMode) input.focus(); });
+    //$('#focusBtn').addEventListener('click', ()=> { if(scannerMode) input.focus(); });
     window.addEventListener('click', ()=> { if(scannerMode) input.focus(); });
     window.addEventListener('visibilitychange', ()=> { if(scannerMode && document.visibilityState==='visible') input.focus(); });
 
